@@ -98,18 +98,23 @@ class Migration_Background_Process extends WP_Background_Process
         return false;
     }
 
-    private function handle_error($exception)
-    {
+    private function handle_error($exception) {
+        $debug = Nuke_To_WordPress_Debug_Handler::get_instance();
+        $debug->log('Migration error occurred', [
+            'error' => $exception->getMessage(),
+            'file' => $exception->getFile(),
+            'line' => $exception->getLine(),
+            'trace' => $exception->getTraceAsString()
+        ], 'error');
+
         $this->migration_state['last_error'] = $exception->getMessage();
         $this->migration_state['status'] = 'failed';
 
-        // Rollback changes from current task
         if ($this->current_checkpoint) {
             $this->rollback->rollback($this->current_checkpoint);
         }
 
         $this->update_state();
-        error_log('Migration error: ' . $exception->getMessage());
     }
 
     protected function complete()

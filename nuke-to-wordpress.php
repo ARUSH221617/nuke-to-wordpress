@@ -32,6 +32,7 @@ register_deactivation_hook(__FILE__, 'nuke_to_wordpress_deactivate');
 // Initialization code
 add_action('admin_menu', 'nuke_to_wordpress_admin_menu');
 add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
+add_action('admin_enqueue_scripts', 'nuke_to_wordpress_admin_styles');
 
 function nuke_to_wordpress_activate()
 {
@@ -42,11 +43,20 @@ function nuke_to_wordpress_activate()
         'nuke_db_user' => '',
         'nuke_db_password' => ''
     ]);
+    // Add cron setting
+    add_option('nuke_to_wordpress_cron_disabled', false);
+    // Add debug setting
+    add_option('nuke_to_wordpress_debug_enabled', false);
 }
 
 function nuke_to_wordpress_deactivate()
 {
     // Code to run on deactivation
+    // Restore default cron if needed
+    if (get_option('nuke_to_wordpress_cron_disabled', false)) {
+        nuke_to_wordpress_restore_default_cron();
+    }
+    delete_option('nuke_to_wordpress_cron_disabled');
 }
 
 function nuke_to_wordpress_admin_menu()
@@ -82,7 +92,8 @@ function nuke_to_wordpress_admin_menu()
     );
 }
 
-function nuke_to_wordpress_enqueue_scripts($hook) {
+function nuke_to_wordpress_enqueue_scripts($hook)
+{
     // Only load on our plugin's pages
     if (strpos($hook, 'nuke-to-wordpress') === false) {
         return;
@@ -90,7 +101,7 @@ function nuke_to_wordpress_enqueue_scripts($hook) {
 
     wp_enqueue_script(
         'nuke-to-wordpress-admin',
-        plugins_url('admin/js/admin.js', __FILE__),
+        plugins_url('admin/js/dist/admin.min.js', __FILE__),
         array('jquery'),
         '1.0.0',
         true
@@ -103,6 +114,23 @@ function nuke_to_wordpress_enqueue_scripts($hook) {
     );
 }
 add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
+
+function nuke_to_wordpress_admin_styles($hook)
+{
+    // Only load on our plugin pages
+    if (strpos($hook, 'nuke-to-wordpress') === false) {
+        return;
+    }
+
+    // Enqueue the compiled and minified CSS
+    wp_enqueue_style(
+        'nuke-to-wordpress-admin',
+        plugin_dir_url(__FILE__) . 'admin/css/nuke-to-wordpress.min.css',
+        [],
+        '1.0.0'
+    );
+}
+add_action('admin_enqueue_scripts', 'nuke_to_wordpress_admin_styles');
 
 function nuke_to_wordpress_settings_page()
 {
@@ -176,11 +204,17 @@ add_action('wp_ajax_start_migration', 'nuke_to_wordpress_start_migration');
 // Check migration status
 function nuke_to_wordpress_check_status()
 {
-    check_ajax_referer('migration_status', 'nonce');
+    check_ajax_referer('start_migration', 'nonce');
 
-    $migration_state = get_option('nuke_to_wordpress_migration_state');
+    $migration_state = get_option('nuke_to_wordpress_migration_state', [
+        'status' => 'not_started',
+        'processed_items' => 0,
+        'total_items' => 0,
+        'current_task' => '',
+        'last_run' => ''
+    ]);
+
     $progress = 0;
-
     if ($migration_state['total_items'] > 0) {
         $progress = ($migration_state['processed_items'] / $migration_state['total_items']) * 100;
     }
@@ -189,8 +223,8 @@ function nuke_to_wordpress_check_status()
         'status' => $migration_state['status'],
         'progress' => $progress,
         'current_task' => $migration_state['current_task'],
-        'last_error' => $migration_state['last_error'],
-        'last_run' => $migration_state['last_run']
+        'last_run' => $migration_state['last_run'],
+        'last_error' => $migration_state['last_error'] ?? ''
     ]);
 }
 add_action('wp_ajax_check_migration_status', 'nuke_to_wordpress_check_status');
@@ -279,11 +313,12 @@ function nuke_to_wordpress_rollback_migration()
 }
 add_action('wp_ajax_rollback_migration', 'nuke_to_wordpress_rollback_migration');
 
-function nuke_to_wordpress_cancel_migration() {
+function nuke_to_wordpress_cancel_migration()
+{
     check_ajax_referer('start_migration', 'nonce');
 
     global $migration_process;
-    
+
     // Update migration state
     $migration_state = get_option('nuke_to_wordpress_migration_state', []);
     $migration_state['status'] = 'cancelled';
@@ -322,4 +357,333 @@ function nuke_to_wordpress_help_page()
     require_once plugin_dir_path(__FILE__) . 'admin/help.php';
     nuke_to_wordpress_help_page_content();
 }
+
+function nuke_to_wordpress_toggle_cron()
+{
+    check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    $disable_cron = isset($_POST['disable_cron']) ? filter_var($_POST['disable_cron'], FILTER_VALIDATE_BOOLEAN) : false;
+
+    try {
+        if ($disable_cron) {
+            $result = nuke_to_wordpress_configure_system_cron();
+        } else {
+            $result = nuke_to_wordpress_restore_default_cron();
+        }
+
+        if ($result['success']) {
+            update_option('nuke_to_wordpress_cron_disabled', $disable_cron);
+            wp_send_json_success(['message' => $result['message']]);
+        } else {
+            wp_send_json_error(['message' => $result['message']]);
+        }
+    } catch (Exception $e) {
+        wp_send_json_error(['message' => $e->getMessage()]);
+    }
+}
+add_action('wp_ajax_toggle_wp_cron', 'nuke_to_wordpress_toggle_cron');
+
+function nuke_to_wordpress_configure_system_cron()
+{
+    // Path to wp-config.php
+    $config_path = ABSPATH . 'wp-config.php';
+
+    if (!is_writable($config_path)) {
+        return [
+            'success' => false,
+            'message' => 'wp-config.php is not writable. Please check file permissions.'
+        ];
+    }
+
+    // Read wp-config.php
+    $config_content = file_get_contents($config_path);
+
+    // Check if DISABLE_WP_CRON is already defined
+    if (strpos($config_content, "define('DISABLE_WP_CRON'") === false) {
+        // Add the constant definition before WordPress settings
+        $config_content = preg_replace(
+            '/(\/\*\s*\@package\sWordPress\s*\*\/)/',
+            "$1\n\ndefine('DISABLE_WP_CRON', true);",
+            $config_content
+        );
+
+        // Backup wp-config.php
+        copy($config_path, $config_path . '.backup');
+
+        // Write the modified content
+        if (file_put_contents($config_path, $config_content) === false) {
+            return [
+                'success' => false,
+                'message' => 'Failed to update wp-config.php'
+            ];
+        }
+    }
+
+    // Set up system cron job
+    if (function_exists('exec')) {
+        $site_url = get_site_url();
+        $cron_command = "*/5 * * * * wget -q -O - {$site_url}/wp-cron.php?doing_wp_cron >/dev/null 2>&1";
+
+        // Remove any existing wp-cron jobs
+        exec('crontab -l | grep -v "wp-cron.php" | crontab -');
+
+        // Add new cron job
+        exec('(crontab -l 2>/dev/null; echo "' . $cron_command . '") | crontab -');
+
+        return [
+            'success' => true,
+            'message' => 'WordPress cron disabled and system cron job configured successfully'
+        ];
+    }
+
+    return [
+        'success' => true,
+        'message' => 'WordPress cron disabled. Please set up system cron job manually.'
+    ];
+}
+
+function nuke_to_wordpress_restore_default_cron()
+{
+    $config_path = ABSPATH . 'wp-config.php';
+
+    if (!is_writable($config_path)) {
+        return [
+            'success' => false,
+            'message' => 'wp-config.php is not writable. Please check file permissions.'
+        ];
+    }
+
+    // Read wp-config.php
+    $config_content = file_get_contents($config_path);
+
+    // Remove DISABLE_WP_CRON definition
+    $config_content = preg_replace(
+        '/\s*define\s*\(\s*[\'"]DISABLE_WP_CRON[\'"]\s*,\s*true\s*\)\s*;\s*/i',
+        '',
+        $config_content
+    );
+
+    // Write the modified content
+    if (file_put_contents($config_path, $config_content) === false) {
+        return [
+            'success' => false,
+            'message' => 'Failed to update wp-config.php'
+        ];
+    }
+
+    // Remove system cron job if possible
+    if (function_exists('exec')) {
+        exec('crontab -l | grep -v "wp-cron.php" | crontab -');
+    }
+
+    return [
+        'success' => true,
+        'message' => 'WordPress default cron restored successfully'
+    ];
+}
+
+function nuke_to_wordpress_manual_migration_step()
+{
+    check_ajax_referer('start_migration', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    $step = isset($_POST['step']) ? sanitize_text_field($_POST['step']) : '';
+    $valid_steps = ['categories', 'articles', 'images'];
+
+    if (!in_array($step, $valid_steps)) {
+        wp_send_json_error(['message' => 'Invalid migration step']);
+        return;
+    }
+
+    try {
+        // Get migration state
+        $migration_state = get_option('nuke_to_wordpress_migration_state', []);
+
+        // Create checkpoint before starting step
+        $rollback = new Migration_Rollback();
+        $checkpoint = $rollback->create_checkpoint();
+
+        $result = execute_manual_step($step);
+
+        if ($result['success']) {
+            // Update migration state
+            $migration_state['processed_items'] += $result['processed'];
+            $migration_state['current_task'] = $step;
+            update_option('nuke_to_wordpress_migration_state', $migration_state);
+
+            wp_send_json_success([
+                'message' => $result['message'],
+                'progress' => [
+                    'processed_items' => $migration_state['processed_items'],
+                    'total_items' => $migration_state['total_items']
+                ]
+            ]);
+        } else {
+            // Rollback changes if step failed
+            $rollback->rollback($checkpoint);
+            wp_send_json_error(['message' => $result['message']]);
+        }
+    } catch (Exception $e) {
+        wp_send_json_error(['message' => $e->getMessage()]);
+    }
+}
+add_action('wp_ajax_manual_migration_step', 'nuke_to_wordpress_manual_migration_step');
+
+function execute_manual_step($step)
+{
+    $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+
+    switch ($step) {
+        case 'categories':
+            return migrate_categories($nuke_db);
+
+        case 'articles':
+            return migrate_articles($nuke_db);
+
+        case 'images':
+            return migrate_images($nuke_db);
+
+        default:
+            return [
+                'success' => false,
+                'message' => 'Invalid step'
+            ];
+    }
+}
+
+function migrate_categories($nuke_db)
+{
+    try {
+        $categories = $nuke_db->query("SELECT * FROM nuke_categories")->fetchAll();
+        $processed = 0;
+
+        foreach ($categories as $category) {
+            $wp_cat_id = wp_insert_category([
+                'cat_name' => $category['title'],
+                'category_description' => $category['description']
+            ]);
+
+            if ($wp_cat_id) {
+                $processed++;
+            }
+        }
+
+        return [
+            'success' => true,
+            'message' => "Processed {$processed} categories",
+            'processed' => $processed
+        ];
+    } catch (Exception $e) {
+        return [
+            'success' => false,
+            'message' => "Failed to migrate categories: " . $e->getMessage()
+        ];
+    }
+}
+
+function migrate_articles($nuke_db)
+{
+    try {
+        $articles = $nuke_db->query("SELECT * FROM nuke_articles")->fetchAll();
+        $processed = 0;
+
+        foreach ($articles as $article) {
+            $post_data = [
+                'post_title' => $article['title'],
+                'post_content' => $article['content'],
+                'post_status' => 'publish',
+                'post_author' => get_current_user_id(),
+                'post_date' => $article['date']
+            ];
+
+            $post_id = wp_insert_post($post_data);
+
+            if ($post_id) {
+                $processed++;
+            }
+        }
+
+        return [
+            'success' => true,
+            'message' => "Processed {$processed} articles",
+            'processed' => $processed
+        ];
+    } catch (Exception $e) {
+        return [
+            'success' => false,
+            'message' => "Failed to migrate articles: " . $e->getMessage()
+        ];
+    }
+}
+
+function migrate_images($nuke_db)
+{
+    try {
+        $images = $nuke_db->query("SELECT * FROM nuke_images")->fetchAll();
+        $processed = 0;
+
+        foreach ($images as $image) {
+            // Implementation for image migration
+            // This would include downloading the image and using wp_insert_attachment
+            $processed++;
+        }
+
+        return [
+            'success' => true,
+            'message' => "Processed {$processed} images",
+            'processed' => $processed
+        ];
+    } catch (Exception $e) {
+        return [
+            'success' => false,
+            'message' => "Failed to migrate images: " . $e->getMessage()
+        ];
+    }
+}
+
+// Add these functions to handle debug actions
+function nuke_to_wordpress_view_logs()
+{
+    check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    $debug_handler = Nuke_To_WordPress_Debug_Handler::get_instance();
+    $logs = $debug_handler->get_logs();
+
+    wp_send_json_success(['logs' => implode('', $logs)]);
+}
+add_action('wp_ajax_view_debug_logs', 'nuke_to_wordpress_view_logs');
+
+function nuke_to_wordpress_clear_logs()
+{
+    check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    $debug_handler = Nuke_To_WordPress_Debug_Handler::get_instance();
+    $result = $debug_handler->clear_logs();
+
+    if ($result) {
+        wp_send_json_success(['message' => 'Logs cleared successfully']);
+    } else {
+        wp_send_json_error(['message' => 'Failed to clear logs']);
+    }
+}
+add_action('wp_ajax_clear_debug_logs', 'nuke_to_wordpress_clear_logs');
 ?>

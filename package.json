@@ -1,12 +1,13 @@
 {
   "name": "nuke-to-wordpress",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "npx tailwindcss -i admin/css/nuke-to-wordpress.css -o admin/css/nuke-to-wordpress.min.css --minify",
-    "dev": "npx tailwindcss -i admin/css/nuke-to-wordpress.css -o admin/css/nuke-to-wordpress.min.css --watch",
+    "build": "npm run build:css && npm run build:js",
+    "build:css": "npx tailwindcss -i admin/css/nuke-to-wordpress.css -o admin/css/nuke-to-wordpress.min.css --minify",
+    "build:js": "rollup -c",
+    "dev": "npm run dev:css & npm run dev:js",
+    "dev:css": "npx tailwindcss -i admin/css/nuke-to-wordpress.css -o admin/css/nuke-to-wordpress.min.css --watch",
+    "dev:js": "rollup -c -w",
     "production": "NODE_ENV=production npm run build"
   },
   "keywords": [],
@@ -14,15 +15,21 @@
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
-    "tailwindcss": "^3.4.1",
+    "@rollup/plugin-commonjs": "^25.0.0",
+    "@rollup/plugin-node-resolve": "^15.0.0",
+    "@rollup/plugin-terser": "^0.4.0",
     "@types/node": "^22.13.10",
     "autoprefixer": "^10.4.21",
-    "postcss": "^8.5.3"
+    "postcss": "^8.5.3",
+    "rollup": "^4.9.0",
+    "rollup-plugin-postcss": "^4.0.2",
+    "tailwindcss": "^3.4.1"
   },
   "dependencies": {
     "@radix-ui/react-icons": "^1.3.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "sweetalert2": "^11.6.13",
     "tailwind-merge": "^3.0.2",
     "tailwindcss-animate": "^1.0.7"
   }
