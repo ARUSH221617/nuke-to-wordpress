@@ -19,6 +19,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+require_once plugin_dir_path(__FILE__) . 'includes/vendor/autoload.php';
+
+use NukeToWordPress\Migration_Background_Process;
+
 // Activation hook
 register_activation_hook(__FILE__, 'nuke_to_wordpress_activate');
 
@@ -31,7 +35,13 @@ add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
 
 function nuke_to_wordpress_activate()
 {
-    // Code to run on activation
+    // Add the settings to the whitelist using the correct method
+    add_option('nuke_to_wordpress_settings', [
+        'nuke_db_host' => 'localhost',
+        'nuke_db_name' => '',
+        'nuke_db_user' => '',
+        'nuke_db_password' => ''
+    ]);
 }
 
 function nuke_to_wordpress_deactivate()
@@ -72,25 +82,39 @@ function nuke_to_wordpress_admin_menu()
     );
 }
 
-function nuke_to_wordpress_enqueue_scripts($hook)
-{
-    // Enqueue scripts and styles
-    if ($hook == 'toplevel_page_nuke-to-wordpress-settings' || $hook == 'nuke-to-wordpress_page_nuke-to-wordpress-migration') {
-        wp_enqueue_script('nuke-to-wordpress-script', plugin_dir_url(__FILE__) . 'admin/js/nuke-to-wordpress.js', array('jquery'), '1.0', true);
-        wp_enqueue_style('nuke-to-wordpress-style', plugin_dir_url(__FILE__) . 'admin/css/nuke-to-wordpress.min.css', array(), '1.0', 'all');
+function nuke_to_wordpress_enqueue_scripts($hook) {
+    // Only load on our plugin's pages
+    if (strpos($hook, 'nuke-to-wordpress') === false) {
+        return;
     }
+
+    wp_enqueue_script(
+        'nuke-to-wordpress-admin',
+        plugins_url('admin/js/admin.js', __FILE__),
+        array('jquery'),
+        '1.0.0',
+        true
+    );
+
+    wp_localize_script(
+        'nuke-to-wordpress-admin',
+        'ajaxurl',
+        admin_url('admin-ajax.php')
+    );
 }
+add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
 
 function nuke_to_wordpress_settings_page()
 {
-    // Display settings page
-    include plugin_dir_path(__FILE__) . 'admin/settings.php';
+    // Use plugin_dir_path to get the correct absolute path
+    require_once plugin_dir_path(__FILE__) . 'admin/settings.php';
+    nuke_to_wordpress_settings_page_content();
 }
 
 function nuke_to_wordpress_migration_page()
 {
-    // Display migration page
-    include plugin_dir_path(__FILE__) . 'admin/migration.php';
+    require_once plugin_dir_path(__FILE__) . 'admin/migration.php';
+    nuke_to_wordpress_migration_page_content();
 }
 
 // Database connection functions
@@ -118,9 +142,6 @@ function nuke_to_wordpress_get_wp_db_connection()
     global $wpdb;
     return $wpdb;
 }
-
-// Include the background processor
-require_once plugin_dir_path(__FILE__) . 'includes/class-migration-background-process.php';
 
 // Initialize the background processor
 global $migration_process;
@@ -257,6 +278,43 @@ function nuke_to_wordpress_rollback_migration()
     }
 }
 add_action('wp_ajax_rollback_migration', 'nuke_to_wordpress_rollback_migration');
+
+function nuke_to_wordpress_cancel_migration() {
+    check_ajax_referer('start_migration', 'nonce');
+
+    global $migration_process;
+    
+    // Update migration state
+    $migration_state = get_option('nuke_to_wordpress_migration_state', []);
+    $migration_state['status'] = 'cancelled';
+    update_option('nuke_to_wordpress_migration_state', $migration_state);
+
+    // Cancel the background process
+    $migration_process->cancel_process();
+
+    // Perform rollback
+    $rollback = new Migration_Rollback();
+    $result = $rollback->rollback();
+
+    if ($result) {
+        // Reset migration state
+        update_option('nuke_to_wordpress_migration_state', [
+            'status' => 'not_started',
+            'current_batch' => 0,
+            'total_items' => 0,
+            'processed_items' => 0,
+            'current_task' => '',
+            'last_error' => '',
+            'last_run' => current_time('mysql'),
+            'checkpoints' => []
+        ]);
+
+        wp_send_json_success(['message' => 'Migration cancelled and rolled back successfully']);
+    } else {
+        wp_send_json_error(['message' => 'Failed to cancel migration']);
+    }
+}
+add_action('wp_ajax_cancel_migration', 'nuke_to_wordpress_cancel_migration');
 
 // Add the help page function
 function nuke_to_wordpress_help_page()

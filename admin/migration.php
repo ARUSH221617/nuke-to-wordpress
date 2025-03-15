@@ -13,11 +13,12 @@ function nuke_to_wordpress_migration_page_content()
                 Nuke to WordPress Migration
             </h1>
 
-            <div id="migration-progress" class="<?php echo $migration_state['status'] === 'not_started' ? 'hidden' : ''; ?>">
+            <div id="migration-progress"
+                class="<?php echo $migration_state['status'] === 'not_started' ? 'hidden' : ''; ?>">
                 <div class="w-full h-4 rounded-full bg-secondary overflow-hidden mb-4">
                     <div class="progress-bar-fill h-full bg-primary transition-all duration-300" style="width: 0%"></div>
                 </div>
-                
+
                 <div class="space-y-4">
                     <p class="text-sm text-muted-foreground progress-status">
                         Processing: <span class="current-task font-medium"></span>
@@ -36,22 +37,32 @@ function nuke_to_wordpress_migration_page_content()
 
                 <div class="migration-actions mt-6 space-x-4">
                     <?php if ($migration_state['status'] === 'failed'): ?>
-                        <button id="retry-migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
+                        <button id="retry-migration"
+                            class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
                             Retry Failed Task
                         </button>
-                        <button id="rollback-migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2">
+                        <button id="rollback-migration"
+                            class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2">
                             Rollback Migration
+                        </button>
+                    <?php endif; ?>
+                    <?php if ($migration_state['status'] === 'in_progress'): ?>
+                        <button id="cancel-migration"
+                            class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-destructive text-destructive-foreground hover:bg-destructive/90 h-10 px-4 py-2">
+                            Cancel Migration
                         </button>
                     <?php endif; ?>
                 </div>
             </div>
 
-            <form method="post" action="" id="migration-form" class="<?php echo $migration_state['status'] !== 'not_started' ? 'hidden' : ''; ?>">
+            <form method="post" action="" id="migration-form"
+                class="<?php echo $migration_state['status'] !== 'not_started' ? 'hidden' : ''; ?>">
                 <?php wp_nonce_field('start_migration', 'migration_nonce'); ?>
                 <p class="text-sm text-muted-foreground mb-4">
                     Click the button below to start the migration process. The migration will run in the background.
                 </p>
-                <button type="submit" name="start_migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
+                <button type="submit" name="start_migration"
+                    class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
                     Start Migration
                 </button>
             </form>
@@ -132,7 +143,7 @@ function nuke_to_wordpress_migration_page_content()
                     .find('.notice-error').text('Error: ' + message);
             }
 
-            $('#retry-migration').on('click', function() {
+            $('#retry-migration').on('click', function () {
                 $.ajax({
                     url: ajaxurl,
                     type: 'POST',
@@ -140,20 +151,20 @@ function nuke_to_wordpress_migration_page_content()
                         action: 'retry_migration',
                         nonce: $('#migration_nonce').val()
                     },
-                    success: function(response) {
+                    success: function (response) {
                         if (response.success) {
                             location.reload();
                         } else {
                             showError('Failed to retry migration');
                         }
                     },
-                    error: function() {
+                    error: function () {
                         showError('Failed to retry migration');
                     }
                 });
             });
 
-            $('#rollback-migration').on('click', function() {
+            $('#rollback-migration').on('click', function () {
                 if (!confirm('Are you sure you want to rollback the migration? This will undo all changes.')) {
                     return;
                 }
@@ -165,15 +176,40 @@ function nuke_to_wordpress_migration_page_content()
                         action: 'rollback_migration',
                         nonce: $('#migration_nonce').val()
                     },
-                    success: function(response) {
+                    success: function (response) {
                         if (response.success) {
                             location.reload();
                         } else {
                             showError('Failed to rollback migration');
                         }
                     },
-                    error: function() {
+                    error: function () {
                         showError('Failed to rollback migration');
+                    }
+                });
+            });
+
+            $('#cancel-migration').on('click', function() {
+                if (!confirm('Are you sure you want to cancel the migration? This will stop the process and rollback changes.')) {
+                    return;
+                }
+
+                $.ajax({
+                    url: ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'cancel_migration',
+                        nonce: $('#migration_nonce').val()
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            location.reload();
+                        } else {
+                            showError('Failed to cancel migration');
+                        }
+                    },
+                    error: function() {
+                        showError('Failed to cancel migration');
                     }
                 });
             });
@@ -186,13 +222,4 @@ function nuke_to_wordpress_migration_page_content()
     </script>
     <?php
 }
-
-function nuke_to_wordpress_start_migration()
-{
-    // Placeholder for migration logic
-    echo '<div class="notice notice-success is-dismissible"><p>Migration started. Please check the progress below.</p></div>';
-    // Add migration logic here
-}
-
-add_action('admin_menu', 'nuke_to_wordpress_admin_menu');
 ?>

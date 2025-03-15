@@ -143,6 +143,7 @@ composer.lock
 
 # Composer
 /vendor/
+/includes/vendor/
 
 build.sh
 
