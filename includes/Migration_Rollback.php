@@ -1,21 +1,26 @@
 <?php
+namespace NukeToWordPress;
+
 if (!defined('ABSPATH')) {
     exit;
 }
 
-class Migration_Rollback {
+class Migration_Rollback
+{
     private $log_table;
     private $batch_size = 50;
 
-    public function __construct() {
+    public function __construct()
+    {
         global $wpdb;
         $this->log_table = $wpdb->prefix . 'nuke_migration_log';
         $this->create_log_table();
     }
 
-    private function create_log_table() {
+    private function create_log_table()
+    {
         global $wpdb;
-        
+
         $charset_collate = $wpdb->get_charset_collate();
         $sql = "CREATE TABLE IF NOT EXISTS {$this->log_table} (
             id bigint(20) NOT NULL AUTO_INCREMENT,
@@ -35,9 +40,10 @@ class Migration_Rollback {
         dbDelta($sql);
     }
 
-    public function log_operation($operation, $entity_type, $wp_id, $nuke_id, $additional_data = null) {
+    public function log_operation($operation, $entity_type, $wp_id, $nuke_id, $additional_data = null)
+    {
         global $wpdb;
-        
+
         return $wpdb->insert(
             $this->log_table,
             [
@@ -51,10 +57,11 @@ class Migration_Rollback {
         );
     }
 
-    public function rollback($from_checkpoint = null) {
+    public function rollback($from_checkpoint = null)
+    {
         try {
             global $wpdb;
-            
+
             // Start transaction
             $wpdb->query('START TRANSACTION');
 
@@ -63,7 +70,7 @@ class Migration_Rollback {
             if ($from_checkpoint) {
                 $where = $wpdb->prepare(" WHERE created_at >= %s", $from_checkpoint);
             }
-            
+
             $operations = $wpdb->get_results(
                 "SELECT * FROM {$this->log_table} {$where} ORDER BY id DESC"
             );
@@ -80,14 +87,14 @@ class Migration_Rollback {
                         $this->rollback_attachment($operation);
                         break;
                 }
-                
+
                 // Delete the log entry
                 $wpdb->delete($this->log_table, ['id' => $operation->id]);
             }
 
             // Commit transaction
             $wpdb->query('COMMIT');
-            
+
             return true;
         } catch (Exception $e) {
             // Rollback transaction
@@ -97,26 +104,29 @@ class Migration_Rollback {
         }
     }
 
-    private function rollback_category($operation) {
+    private function rollback_category($operation)
+    {
         if ($operation->wp_id) {
             wp_delete_term($operation->wp_id, 'category');
         }
     }
 
-    private function rollback_post($operation) {
+    private function rollback_post($operation)
+    {
         if ($operation->wp_id) {
             wp_delete_post($operation->wp_id, true);
         }
     }
 
-    private function rollback_attachment($operation) {
+    private function rollback_attachment($operation)
+    {
         if ($operation->wp_id) {
             // Get attachment path before deletion
             $file = get_attached_file($operation->wp_id);
-            
+
             // Delete the attachment
             wp_delete_attachment($operation->wp_id, true);
-            
+
             // Delete physical file if it exists
             if ($file && file_exists($file)) {
                 unlink($file);
@@ -124,7 +134,8 @@ class Migration_Rollback {
         }
     }
 
-    public function create_checkpoint() {
+    public function create_checkpoint()
+    {
         return current_time('mysql');
     }
 }

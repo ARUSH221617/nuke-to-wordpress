@@ -1,9 +1,11 @@
 <?php
+namespace NukeToWordPress;
+
+use WP_Background_Process;
+
 if (!defined('ABSPATH')) {
     exit;
 }
-
-require_once plugin_dir_path(__FILE__) . 'vendor/wp-background-processing/wp-background-processing.php';
 
 class Migration_Background_Process extends WP_Background_Process
 {
@@ -28,6 +30,31 @@ class Migration_Background_Process extends WP_Background_Process
         ]);
     }
 
+    public function cancel_process() {
+        $batch = $this->get_batch();
+        
+        if (!empty($batch)) {
+            $this->delete($batch->key);
+        }
+
+        // Clear the queue
+        $this->data = [];
+        $this->save();
+
+        // Delete all batches
+        global $wpdb;
+        $table = $wpdb->options;
+        $column = 'option_name';
+        $key_column = 'option_id';
+        $value_column = 'option_value';
+
+        $key = $wpdb->esc_like($this->identifier . '_batch_') . '%';
+
+        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$column} LIKE %s", $key));
+
+        return true;
+    }
+
     protected function task($item)
     {
         try {
@@ -40,9 +67,9 @@ class Migration_Background_Process extends WP_Background_Process
 
             $this->migration_state['last_run'] = current_time('mysql');
             $this->migration_state['current_task'] = $item['task'];
-            
+
             $result = $this->process_task($item);
-            
+
             if ($result === false) {
                 throw new Exception('Task processing failed');
             }
@@ -75,12 +102,12 @@ class Migration_Background_Process extends WP_Background_Process
     {
         $this->migration_state['last_error'] = $exception->getMessage();
         $this->migration_state['status'] = 'failed';
-        
+
         // Rollback changes from current task
         if ($this->current_checkpoint) {
             $this->rollback->rollback($this->current_checkpoint);
         }
-        
+
         $this->update_state();
         error_log('Migration error: ' . $exception->getMessage());
     }
@@ -122,7 +149,7 @@ class Migration_Background_Process extends WP_Background_Process
     {
         try {
             $processed = nuke_to_wordpress_migrate_categories_batch($item['batch_size']);
-            
+
             // Log each category creation
             foreach ($processed['items'] as $category) {
                 $this->rollback->log_operation(
@@ -135,7 +162,7 @@ class Migration_Background_Process extends WP_Background_Process
             }
 
             $this->migration_state['processed_items'] += count($processed['items']);
-            
+
             if ($processed['count'] < $item['batch_size']) {
                 return [
                     'task' => 'articles',
@@ -208,11 +235,11 @@ class Migration_Background_Process extends WP_Background_Process
         // Reset state for current task
         $current_task = $this->migration_state['current_task'];
         $checkpoint = $this->migration_state['checkpoints'][$current_task] ?? null;
-        
+
         if ($checkpoint) {
             // Rollback changes from failed task
             $this->rollback->rollback($checkpoint);
-            
+
             // Remove checkpoint and retry task
             unset($this->migration_state['checkpoints'][$current_task]);
             $this->migration_state['status'] = 'in_progress';
@@ -226,7 +253,7 @@ class Migration_Background_Process extends WP_Background_Process
                 'batch_size' => 50
             ]);
             $this->save()->dispatch();
-            
+
             return true;
         }
 
