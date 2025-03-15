@@ -145,3 +145,5 @@ composer.lock
 /vendor/
 
 build.sh
+
+nuke-to-wordpress-*.zip
