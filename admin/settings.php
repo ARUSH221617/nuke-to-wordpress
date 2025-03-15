@@ -3,95 +3,167 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-function nuke_to_wordpress_settings_page_content() {
+function nuke_to_wordpress_settings_page_content()
+{
+    $options = get_option('nuke_to_wordpress_settings', [
+        'nuke_db_host' => 'localhost',
+        'nuke_db_name' => '',
+        'nuke_db_user' => '',
+        'nuke_db_password' => ''
+    ]);
     ?>
     <div class="wrap">
-        <h1>Nuke to WordPress Settings</h1>
-        <form method="post" action="options.php">
-            <?php
-            settings_fields('nuke_to_wordpress_settings_group');
-            do_settings_sections('nuke-to-wordpress-settings');
-            submit_button();
-            ?>
+        <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+        <form id="nuke-to-wordpress-settings-form">
+            <?php wp_nonce_field('nuke_to_wordpress_settings_nonce', 'nuke_to_wordpress_settings_nonce'); ?>
+
+            <table class="form-table" role="presentation">
+                <tbody>
+                    <tr>
+                        <th scope="row">
+                            <label for="nuke_db_host">Database Host</label>
+                        </th>
+                        <td>
+                            <input type="text" id="nuke_db_host" name="nuke_to_wordpress_settings[nuke_db_host]"
+                                value="<?php echo esc_attr($options['nuke_db_host']); ?>" class="regular-text">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="nuke_db_name">Database Name</label>
+                        </th>
+                        <td>
+                            <input type="text" id="nuke_db_name" name="nuke_to_wordpress_settings[nuke_db_name]"
+                                value="<?php echo esc_attr($options['nuke_db_name']); ?>" class="regular-text">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="nuke_db_user">Database User</label>
+                        </th>
+                        <td>
+                            <input type="text" id="nuke_db_user" name="nuke_to_wordpress_settings[nuke_db_user]"
+                                value="<?php echo esc_attr($options['nuke_db_user']); ?>" class="regular-text">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="nuke_db_password">Database Password</label>
+                        </th>
+                        <td>
+                            <input type="password" id="nuke_db_password" name="nuke_to_wordpress_settings[nuke_db_password]"
+                                value="<?php echo esc_attr($options['nuke_db_password']); ?>" class="regular-text">
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div id="settings-message" class="notice" style="display: none;"></div>
+
+            <div class="submit-button-group">
+                <?php submit_button('Save Settings', 'primary', 'submit', false); ?>
+                <button type="button" id="cancel-settings" class="button button-secondary">
+                    Cancel
+                </button>
+            </div>
         </form>
     </div>
+
+    <style>
+        .submit-button-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+    </style>
     <?php
 }
 
-function nuke_to_wordpress_settings_init() {
-    register_setting('nuke_to_wordpress_settings_group', 'nuke_to_wordpress_settings');
+function nuke_to_wordpress_sanitize_settings($input)
+{
+    $sanitized = [];
 
-    add_settings_section(
-        'nuke_to_wordpress_settings_section',
-        'Nuke PHP Database Settings',
-        'nuke_to_wordpress_settings_section_callback',
-        'nuke-to-wordpress-settings'
-    );
+    if (isset($input['nuke_db_host'])) {
+        $sanitized['nuke_db_host'] = sanitize_text_field($input['nuke_db_host']);
+    }
 
-    add_settings_field(
-        'nuke_to_wordpress_nuke_db_host',
-        'Nuke DB Host',
-        'nuke_to_wordpress_nuke_db_host_callback',
-        'nuke-to-wordpress-settings',
-        'nuke_to_wordpress_settings_section'
-    );
+    if (isset($input['nuke_db_name'])) {
+        $sanitized['nuke_db_name'] = sanitize_text_field($input['nuke_db_name']);
+    }
 
-    add_settings_field(
-        'nuke_to_wordpress_nuke_db_name',
-        'Nuke DB Name',
-        'nuke_to_wordpress_nuke_db_name_callback',
-        'nuke-to-wordpress-settings',
-        'nuke_to_wordpress_settings_section'
-    );
+    if (isset($input['nuke_db_user'])) {
+        $sanitized['nuke_db_user'] = sanitize_text_field($input['nuke_db_user']);
+    }
 
-    add_settings_field(
-        'nuke_to_wordpress_nuke_db_user',
-        'Nuke DB User',
-        'nuke_to_wordpress_nuke_db_user_callback',
-        'nuke-to-wordpress-settings',
-        'nuke_to_wordpress_settings_section'
-    );
+    if (isset($input['nuke_db_password'])) {
+        $sanitized['nuke_db_password'] = $input['nuke_db_password'];
+    }
 
-    add_settings_field(
-        'nuke_to_wordpress_nuke_db_password',
-        'Nuke DB Password',
-        'nuke_to_wordpress_nuke_db_password_callback',
-        'nuke-to-wordpress-settings',
-        'nuke_to_wordpress_settings_section'
-    );
+    return $sanitized;
 }
 
-function nuke_to_wordpress_settings_section_callback() {
-    echo '<p>Enter your Nuke PHP database connection details below.</p>';
-}
+function nuke_to_wordpress_save_settings()
+{
+    try {
+        // Verify nonce
+        if (!check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce', false)) {
+            wp_send_json_error(['message' => 'Invalid security token']);
+            return;
+        }
 
-function nuke_to_wordpress_nuke_db_host_callback() {
-    $options = get_option('nuke_to_wordpress_settings');
-    ?>
-    <input type="text" name="nuke_to_wordpress_settings[nuke_db_host]" value="<?php echo esc_attr($options['nuke_db_host']); ?>" />
-    <?php
-}
+        // Check permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Insufficient permissions']);
+            return;
+        }
 
-function nuke_to_wordpress_nuke_db_name_callback() {
-    $options = get_option('nuke_to_wordpress_settings');
-    ?>
-    <input type="text" name="nuke_to_wordpress_settings[nuke_db_name]" value="<?php echo esc_attr($options['nuke_db_name']); ?>" />
-    <?php
-}
+        // Verify form data exists
+        if (empty($_POST['formData'])) {
+            wp_send_json_error(['message' => 'No form data received']);
+            return;
+        }
 
-function nuke_to_wordpress_nuke_db_user_callback() {
-    $options = get_option('nuke_to_wordpress_settings');
-    ?>
-    <input type="text" name="nuke_to_wordpress_settings[nuke_db_user]" value="<?php echo esc_attr($options['nuke_db_user']); ?>" />
-    <?php
-}
+        // Parse form data
+        parse_str($_POST['formData'], $settings);
 
-function nuke_to_wordpress_nuke_db_password_callback() {
-    $options = get_option('nuke_to_wordpress_settings');
-    ?>
-    <input type="password" name="nuke_to_wordpress_settings[nuke_db_password]" value="<?php echo esc_attr($options['nuke_db_password']); ?>" />
-    <?php
-}
+        if (empty($settings['nuke_to_wordpress_settings'])) {
+            wp_send_json_error(['message' => 'Invalid settings format']);
+            return;
+        }
 
-add_action('admin_init', 'nuke_to_wordpress_settings_init');
-?>
+        $sanitized_settings = nuke_to_wordpress_sanitize_settings($settings['nuke_to_wordpress_settings']);
+
+        // Test database connection
+        try {
+            $dsn = sprintf(
+                "mysql:host=%s;dbname=%s;charset=utf8mb4",
+                $sanitized_settings['nuke_db_host'],
+                $sanitized_settings['nuke_db_name']
+            );
+
+            $pdo = new PDO(
+                $dsn,
+                $sanitized_settings['nuke_db_user'],
+                $sanitized_settings['nuke_db_password'],
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+            );
+
+            // Save settings if connection successful
+            $updated = update_option('nuke_to_wordpress_settings', $sanitized_settings);
+
+            if ($updated) {
+                wp_send_json_success(['message' => 'Settings saved successfully']);
+            } else {
+                wp_send_json_error(['message' => 'Failed to update settings in database']);
+            }
+
+        } catch (PDOException $e) {
+            wp_send_json_error(['message' => 'Database connection failed: ' . $e->getMessage()]);
+        }
+
+    } catch (Exception $e) {
+        error_log('Nuke to WordPress settings error: ' . $e->getMessage());
+        wp_send_json_error(['message' => 'An unexpected error occurred']);
+    }
+}
+add_action('wp_ajax_save_nuke_settings', 'nuke_to_wordpress_save_settings');
