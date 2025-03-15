@@ -1,12 +1,17 @@
 <?php
 /*
 Plugin Name: Nuke to WordPress Migration
-Plugin URI: https://example.com/nuke-to-wordpress
-Description: A plugin to migrate data from Nuke PHP to WordPress.
-Version: 1.0
+Plugin URI: https://github.com/ARUSH221617/nuke-to-wordpress
+Description: A professional migration tool to transfer content from Nuke PHP to WordPress
+Version: 1.0.0
+Requires at least: 5.8
+Requires PHP: 7.4
 Author: Your Name
-Author URI: https://example.com
-License: GPL2
+Author URI: https://arush.ir
+License: GPL v2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: nuke-to-wordpress
+Domain Path: /languages
 */
 
 // Exit if accessed directly
@@ -54,6 +59,16 @@ function nuke_to_wordpress_admin_menu()
         'manage_options',
         'nuke-to-wordpress-migration',
         'nuke_to_wordpress_migration_page'
+    );
+
+    // Add new Help page
+    add_submenu_page(
+        'nuke-to-wordpress-settings',
+        'Help & Documentation',
+        'Help',
+        'manage_options',
+        'nuke-to-wordpress-help',
+        'nuke_to_wordpress_help_page'
     );
 }
 
@@ -199,5 +214,54 @@ function nuke_to_wordpress_migrate_images_batch($batch_size)
 {
     // Implementation similar to categories batch processing
     // but for images
+}
+
+function nuke_to_wordpress_retry_migration()
+{
+    check_ajax_referer('start_migration', 'nonce');
+
+    global $migration_process;
+    $result = $migration_process->retry_failed_migration();
+
+    if ($result) {
+        wp_send_json_success(['message' => 'Migration retry initiated']);
+    } else {
+        wp_send_json_error(['message' => 'Unable to retry migration']);
+    }
+}
+add_action('wp_ajax_retry_migration', 'nuke_to_wordpress_retry_migration');
+
+function nuke_to_wordpress_rollback_migration()
+{
+    check_ajax_referer('start_migration', 'nonce');
+
+    $rollback = new Migration_Rollback();
+    $result = $rollback->rollback();
+
+    if ($result) {
+        // Reset migration state
+        update_option('nuke_to_wordpress_migration_state', [
+            'status' => 'not_started',
+            'current_batch' => 0,
+            'total_items' => 0,
+            'processed_items' => 0,
+            'current_task' => '',
+            'last_error' => '',
+            'last_run' => current_time('mysql'),
+            'checkpoints' => []
+        ]);
+
+        wp_send_json_success(['message' => 'Migration rolled back successfully']);
+    } else {
+        wp_send_json_error(['message' => 'Failed to rollback migration']);
+    }
+}
+add_action('wp_ajax_rollback_migration', 'nuke_to_wordpress_rollback_migration');
+
+// Add the help page function
+function nuke_to_wordpress_help_page()
+{
+    require_once plugin_dir_path(__FILE__) . 'admin/help.php';
+    nuke_to_wordpress_help_page_content();
 }
 ?>

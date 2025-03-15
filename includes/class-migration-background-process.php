@@ -9,10 +9,13 @@ class Migration_Background_Process extends WP_Background_Process
 {
     protected $action = 'nuke_migration';
     private $migration_state;
+    private $rollback;
+    private $current_checkpoint;
 
     public function __construct()
     {
         parent::__construct();
+        $this->rollback = new Migration_Rollback();
         $this->migration_state = get_option('nuke_to_wordpress_migration_state', [
             'status' => 'not_started',
             'current_batch' => 0,
@@ -20,36 +23,66 @@ class Migration_Background_Process extends WP_Background_Process
             'processed_items' => 0,
             'current_task' => '',
             'last_error' => '',
-            'last_run' => current_time('mysql')
+            'last_run' => current_time('mysql'),
+            'checkpoints' => []
         ]);
     }
 
     protected function task($item)
     {
         try {
+            // Create checkpoint before starting new task
+            if ($item['task'] !== $this->migration_state['current_task']) {
+                $this->current_checkpoint = $this->rollback->create_checkpoint();
+                $this->migration_state['checkpoints'][$item['task']] = $this->current_checkpoint;
+                $this->update_state();
+            }
+
             $this->migration_state['last_run'] = current_time('mysql');
             $this->migration_state['current_task'] = $item['task'];
-
-            switch ($item['task']) {
-                case 'init':
-                    return $this->init_migration();
-
-                case 'categories':
-                    return $this->process_categories($item);
-
-                case 'articles':
-                    return $this->process_articles($item);
-
-                case 'images':
-                    return $this->process_images($item);
+            
+            $result = $this->process_task($item);
+            
+            if ($result === false) {
+                throw new Exception('Task processing failed');
             }
-        } catch (Exception $e) {
-            $this->migration_state['last_error'] = $e->getMessage();
-            error_log('Migration error: ' . $e->getMessage());
-        }
 
-        $this->update_state();
+            $this->update_state();
+            return $result;
+
+        } catch (Exception $e) {
+            $this->handle_error($e);
+            return false;
+        }
+    }
+
+    private function process_task($item)
+    {
+        switch ($item['task']) {
+            case 'init':
+                return $this->init_migration();
+            case 'categories':
+                return $this->process_categories($item);
+            case 'articles':
+                return $this->process_articles($item);
+            case 'images':
+                return $this->process_images($item);
+        }
         return false;
+    }
+
+    private function handle_error($exception)
+    {
+        $this->migration_state['last_error'] = $exception->getMessage();
+        $this->migration_state['status'] = 'failed';
+        
+        // Rollback changes from current task
+        if ($this->current_checkpoint) {
+            $this->rollback->rollback($this->current_checkpoint);
+        }
+        
+        $this->update_state();
+        error_log('Migration error: ' . $exception->getMessage());
     }
 
     protected function complete()
@@ -87,24 +120,39 @@ class Migration_Background_Process extends WP_Background_Process
 
     private function process_categories($item)
     {
-        $processed = nuke_to_wordpress_migrate_categories_batch($item['batch_size']);
-        $this->migration_state['processed_items'] += $processed;
+        try {
+            $processed = nuke_to_wordpress_migrate_categories_batch($item['batch_size']);
+            
+            // Log each category creation
+            foreach ($processed['items'] as $category) {
+                $this->rollback->log_operation(
+                    'create',
+                    'category',
+                    $category['wp_id'],
+                    $category['nuke_id'],
+                    ['name' => $category['name']]
+                );
+            }
 
-        if ($processed < $item['batch_size']) {
-            // Move to articles
+            $this->migration_state['processed_items'] += count($processed['items']);
+            
+            if ($processed['count'] < $item['batch_size']) {
+                return [
+                    'task' => 'articles',
+                    'offset' => 0,
+                    'batch_size' => 50
+                ];
+            }
+
             return [
-                'task' => 'articles',
-                'offset' => 0,
-                'batch_size' => 50
+                'task' => 'categories',
+                'offset' => $item['offset'] + $processed['count'],
+                'batch_size' => $item['batch_size']
             ];
-        }
 
-        // Continue with next batch of categories
-        return [
-            'task' => 'categories',
-            'offset' => $item['offset'] + $processed,
-            'batch_size' => $item['batch_size']
-        ];
+        } catch (Exception $e) {
+            throw new Exception('Category migration failed: ' . $e->getMessage());
+        }
     }
 
     private function process_articles($item)
@@ -149,5 +197,39 @@ class Migration_Background_Process extends WP_Background_Process
     private function update_state()
     {
         update_option('nuke_to_wordpress_migration_state', $this->migration_state);
+    }
+
+    public function retry_failed_migration()
+    {
+        if ($this->migration_state['status'] !== 'failed') {
+            return false;
+        }
+
+        // Reset state for current task
+        $current_task = $this->migration_state['current_task'];
+        $checkpoint = $this->migration_state['checkpoints'][$current_task] ?? null;
+        
+        if ($checkpoint) {
+            // Rollback changes from failed task
+            $this->rollback->rollback($checkpoint);
+            
+            // Remove checkpoint and retry task
+            unset($this->migration_state['checkpoints'][$current_task]);
+            $this->migration_state['status'] = 'in_progress';
+            $this->migration_state['last_error'] = '';
+            $this->update_state();
+
+            // Re-queue the failed task
+            $this->push_to_queue([
+                'task' => $current_task,
+                'offset' => 0,
+                'batch_size' => 50
+            ]);
+            $this->save()->dispatch();
+            
+            return true;
+        }
+
+        return false;
     }
 }

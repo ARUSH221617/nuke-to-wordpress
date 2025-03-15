@@ -135,6 +135,13 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-vendor/
-
 composer.lock
+
+# Production
+/admin/css/*.min.css
+/admin/js/*.min.js
+
+# Composer
+/vendor/
+
+build.sh

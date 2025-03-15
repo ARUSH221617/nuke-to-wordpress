@@ -7,27 +7,55 @@ function nuke_to_wordpress_migration_page_content()
 {
     $migration_state = get_option('nuke_to_wordpress_migration_state', ['status' => 'not_started']);
     ?>
-    <div class="wrap">
-        <h1>Nuke to WordPress Migration</h1>
+    <div class="min-h-screen p-8 bg-background text-foreground">
+        <div class="container max-w-2xl">
+            <h1 class="scroll-m-20 text-4xl font-extrabold tracking-tight lg:text-5xl mb-8">
+                Nuke to WordPress Migration
+            </h1>
 
-        <div id="migration-progress" class="<?php echo $migration_state['status'] === 'not_started' ? 'hidden' : ''; ?>">
-            <div class="progress-bar">
-                <div class="progress-bar-fill" style="width: 0%"></div>
+            <div id="migration-progress" class="<?php echo $migration_state['status'] === 'not_started' ? 'hidden' : ''; ?>">
+                <div class="w-full h-4 rounded-full bg-secondary overflow-hidden mb-4">
+                    <div class="progress-bar-fill h-full bg-primary transition-all duration-300" style="width: 0%"></div>
+                </div>
+                
+                <div class="space-y-4">
+                    <p class="text-sm text-muted-foreground progress-status">
+                        Processing: <span class="current-task font-medium"></span>
+                    </p>
+                    <p class="text-sm text-muted-foreground progress-percentage">0% Complete</p>
+                    <p class="text-sm text-muted-foreground last-run">
+                        Last activity: <span></span>
+                    </p>
+                </div>
+
+                <div class="error-message hidden mt-4">
+                    <div class="p-4 rounded-lg bg-destructive/15 text-destructive">
+                        <p class="text-sm"></p>
+                    </div>
+                </div>
+
+                <div class="migration-actions mt-6 space-x-4">
+                    <?php if ($migration_state['status'] === 'failed'): ?>
+                        <button id="retry-migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
+                            Retry Failed Task
+                        </button>
+                        <button id="rollback-migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2">
+                            Rollback Migration
+                        </button>
+                    <?php endif; ?>
+                </div>
             </div>
-            <p class="progress-status">Processing: <span class="current-task"></span></p>
-            <p class="progress-percentage">0% Complete</p>
-            <p class="last-run">Last activity: <span></span></p>
-            <div class="error-message hidden">
-                <p class="notice notice-error"></p>
-            </div>
+
+            <form method="post" action="" id="migration-form" class="<?php echo $migration_state['status'] !== 'not_started' ? 'hidden' : ''; ?>">
+                <?php wp_nonce_field('start_migration', 'migration_nonce'); ?>
+                <p class="text-sm text-muted-foreground mb-4">
+                    Click the button below to start the migration process. The migration will run in the background.
+                </p>
+                <button type="submit" name="start_migration" class="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2">
+                    Start Migration
+                </button>
+            </form>
         </div>
-
-        <form method="post" action="" id="migration-form"
-            class="<?php echo $migration_state['status'] !== 'not_started' ? 'hidden' : ''; ?>">
-            <?php wp_nonce_field('start_migration', 'migration_nonce'); ?>
-            <p>Click the button below to start the migration process. The migration will run in the background.</p>
-            <input type="submit" name="start_migration" class="button button-primary" value="Start Migration" />
-        </form>
     </div>
 
     <script>
@@ -103,6 +131,52 @@ function nuke_to_wordpress_migration_page_content()
                 $('.error-message').removeClass('hidden')
                     .find('.notice-error').text('Error: ' + message);
             }
+
+            $('#retry-migration').on('click', function() {
+                $.ajax({
+                    url: ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'retry_migration',
+                        nonce: $('#migration_nonce').val()
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            location.reload();
+                        } else {
+                            showError('Failed to retry migration');
+                        }
+                    },
+                    error: function() {
+                        showError('Failed to retry migration');
+                    }
+                });
+            });
+
+            $('#rollback-migration').on('click', function() {
+                if (!confirm('Are you sure you want to rollback the migration? This will undo all changes.')) {
+                    return;
+                }
+
+                $.ajax({
+                    url: ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'rollback_migration',
+                        nonce: $('#migration_nonce').val()
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            location.reload();
+                        } else {
+                            showError('Failed to rollback migration');
+                        }
+                    },
+                    error: function() {
+                        showError('Failed to rollback migration');
+                    }
+                });
+            });
 
             // Start checking if migration is already in progress
             if ($('#migration-progress').is(':visible')) {
