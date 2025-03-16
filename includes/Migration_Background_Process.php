@@ -2,6 +2,8 @@
 namespace NukeToWordPress;
 
 use WP_Background_Process;
+use Exception;
+use Nuke_To_WordPress_Debug_Handler;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -30,27 +32,21 @@ class Migration_Background_Process extends WP_Background_Process
         ]);
     }
 
-    public function cancel_process() {
+    public function cancel_process()
+    {
         $batch = $this->get_batch();
-        
+
         if (!empty($batch)) {
             $this->delete($batch->key);
         }
 
-        // Clear the queue
         $this->data = [];
         $this->save();
 
-        // Delete all batches
         global $wpdb;
         $table = $wpdb->options;
-        $column = 'option_name';
-        $key_column = 'option_id';
-        $value_column = 'option_value';
-
         $key = $wpdb->esc_like($this->identifier . '_batch_') . '%';
-
-        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$column} LIKE %s", $key));
+        $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE option_name LIKE %s", $key));
 
         return true;
     }
@@ -58,7 +54,6 @@ class Migration_Background_Process extends WP_Background_Process
     protected function task($item)
     {
         try {
-            // Create checkpoint before starting new task
             if ($item['task'] !== $this->migration_state['current_task']) {
                 $this->current_checkpoint = $this->rollback->create_checkpoint();
                 $this->migration_state['checkpoints'][$item['task']] = $this->current_checkpoint;
@@ -98,7 +93,8 @@ class Migration_Background_Process extends WP_Background_Process
         return false;
     }
 
-    private function handle_error($exception) {
+    private function handle_error($exception)
+    {
         $debug = Nuke_To_WordPress_Debug_Handler::get_instance();
         $debug->log('Migration error occurred', [
             'error' => $exception->getMessage(),
@@ -124,64 +120,71 @@ class Migration_Background_Process extends WP_Background_Process
         $this->update_state();
     }
 
+    private function update_state()
+    {
+        update_option('nuke_to_wordpress_migration_state', $this->migration_state);
+    }
+
     private function init_migration()
     {
         try {
             $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
 
+            // Count total items to migrate
             $categories_count = $nuke_db->query("SELECT COUNT(*) FROM nuke_categories")->fetchColumn();
             $articles_count = $nuke_db->query("SELECT COUNT(*) FROM nuke_articles")->fetchColumn();
             $images_count = $nuke_db->query("SELECT COUNT(*) FROM nuke_images")->fetchColumn();
 
-            $this->migration_state['total_items'] = $categories_count + $articles_count + $images_count;
+            $total_items = $categories_count + $articles_count + $images_count;
+
+            // Update migration state
             $this->migration_state['status'] = 'in_progress';
+            $this->migration_state['total_items'] = $total_items;
             $this->update_state();
 
-            // Queue up the categories processing
-            return [
-                'task' => 'categories',
-                'offset' => 0,
-                'batch_size' => 50
-            ];
+            // Queue up the migration tasks
+            $this->push_to_queue(['task' => 'categories']);
+            $this->push_to_queue(['task' => 'articles']);
+            $this->push_to_queue(['task' => 'images']);
+            $this->save();
+
+            return true;
         } catch (Exception $e) {
-            $this->migration_state['last_error'] = $e->getMessage();
-            $this->update_state();
-            return false;
+            throw new Exception('Failed to initialize migration: ' . $e->getMessage());
         }
     }
 
     private function process_categories($item)
     {
         try {
-            $processed = nuke_to_wordpress_migrate_categories_batch($item['batch_size']);
+            $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+            $categories = $nuke_db->query("SELECT * FROM nuke_categories")->fetchAll();
 
-            // Log each category creation
-            foreach ($processed['items'] as $category) {
-                $this->rollback->log_operation(
-                    'create',
-                    'category',
-                    $category['wp_id'],
-                    $category['nuke_id'],
-                    ['name' => $category['name']]
-                );
+            foreach ($categories as $category) {
+                // Check if category already exists
+                $existing_cat = get_term_by('name', $category['title'], 'category');
+                if ($existing_cat) {
+                    continue;
+                }
+
+                // Insert category
+                $wp_cat_id = wp_insert_category([
+                    'cat_name' => $category['title'],
+                    'category_description' => $category['description'],
+                    'category_nicename' => sanitize_title($category['title'])
+                ]);
+
+                if (is_wp_error($wp_cat_id)) {
+                    throw new Exception('Failed to insert category: ' . $wp_cat_id->get_error_message());
+                }
+
+                // Log the migration
+                $this->rollback->log_operation('insert', 'category', $wp_cat_id, $category['id']);
+                $this->migration_state['processed_items']++;
             }
 
-            $this->migration_state['processed_items'] += count($processed['items']);
-
-            if ($processed['count'] < $item['batch_size']) {
-                return [
-                    'task' => 'articles',
-                    'offset' => 0,
-                    'batch_size' => 50
-                ];
-            }
-
-            return [
-                'task' => 'categories',
-                'offset' => $item['offset'] + $processed['count'],
-                'batch_size' => $item['batch_size']
-            ];
-
+            $this->update_state();
+            return true;
         } catch (Exception $e) {
             throw new Exception('Category migration failed: ' . $e->getMessage());
         }
@@ -189,79 +192,107 @@ class Migration_Background_Process extends WP_Background_Process
 
     private function process_articles($item)
     {
-        $processed = nuke_to_wordpress_migrate_articles_batch($item['batch_size']);
-        $this->migration_state['processed_items'] += $processed;
+        try {
+            $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+            $articles = $nuke_db->query("SELECT * FROM nuke_articles")->fetchAll();
 
-        if ($processed < $item['batch_size']) {
-            // Move to images
-            return [
-                'task' => 'images',
-                'offset' => 0,
-                'batch_size' => 50
-            ];
+            foreach ($articles as $article) {
+                // Check if article already exists
+                $existing_post = get_page_by_title($article['title'], OBJECT, 'post');
+                if ($existing_post) {
+                    continue;
+                }
+
+                // Prepare post data
+                $post_data = [
+                    'post_title' => $article['title'],
+                    'post_content' => $article['content'],
+                    'post_status' => 'publish',
+                    'post_author' => get_current_user_id(),
+                    'post_date' => $article['date'],
+                    'post_type' => 'post'
+                ];
+
+                // Insert post
+                $post_id = wp_insert_post($post_data, true);
+
+                if (is_wp_error($post_id)) {
+                    throw new Exception('Failed to insert article: ' . $post_id->get_error_message());
+                }
+
+                // Set categories if they exist
+                if (!empty($article['category_id'])) {
+                    wp_set_post_categories($post_id, [$article['category_id']]);
+                }
+
+                // Log the migration
+                $this->rollback->log_operation('insert', 'post', $post_id, $article['id']);
+                $this->migration_state['processed_items']++;
+            }
+
+            $this->update_state();
+            return true;
+        } catch (Exception $e) {
+            throw new Exception('Article migration failed: ' . $e->getMessage());
         }
-
-        // Continue with next batch of articles
-        return [
-            'task' => 'articles',
-            'offset' => $item['offset'] + $processed,
-            'batch_size' => $item['batch_size']
-        ];
     }
 
     private function process_images($item)
     {
-        $processed = nuke_to_wordpress_migrate_images_batch($item['batch_size']);
-        $this->migration_state['processed_items'] += $processed;
+        try {
+            $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+            $images = $nuke_db->query("SELECT * FROM nuke_images")->fetchAll();
+            $upload_dir = wp_upload_dir();
 
-        if ($processed < $item['batch_size']) {
-            return false; // Complete the migration
-        }
+            foreach ($images as $image) {
+                // Create year/month directories if they don't exist
+                $year_month = date('Y/m', strtotime($image['date']));
+                $upload_path = $upload_dir['basedir'] . '/' . $year_month;
 
-        // Continue with next batch of images
-        return [
-            'task' => 'images',
-            'offset' => $item['offset'] + $processed,
-            'batch_size' => $item['batch_size']
-        ];
-    }
+                if (!file_exists($upload_path)) {
+                    wp_mkdir_p($upload_path);
+                }
 
-    private function update_state()
-    {
-        update_option('nuke_to_wordpress_migration_state', $this->migration_state);
-    }
+                // Download and save the image
+                $image_url = $image['url'];
+                $image_data = file_get_contents($image_url);
+                $filename = basename($image_url);
+                $file_path = $upload_path . '/' . $filename;
 
-    public function retry_failed_migration()
-    {
-        if ($this->migration_state['status'] !== 'failed') {
-            return false;
-        }
+                if (file_put_contents($file_path, $image_data) === false) {
+                    throw new Exception('Failed to save image: ' . $filename);
+                }
 
-        // Reset state for current task
-        $current_task = $this->migration_state['current_task'];
-        $checkpoint = $this->migration_state['checkpoints'][$current_task] ?? null;
+                // Prepare attachment data
+                $wp_filetype = wp_check_filetype($filename);
+                $attachment = [
+                    'post_mime_type' => $wp_filetype['type'],
+                    'post_title' => sanitize_file_name($filename),
+                    'post_content' => '',
+                    'post_status' => 'inherit'
+                ];
 
-        if ($checkpoint) {
-            // Rollback changes from failed task
-            $this->rollback->rollback($checkpoint);
+                // Insert attachment
+                $attach_id = wp_insert_attachment($attachment, $file_path);
 
-            // Remove checkpoint and retry task
-            unset($this->migration_state['checkpoints'][$current_task]);
-            $this->migration_state['status'] = 'in_progress';
-            $this->migration_state['last_error'] = '';
+                if (is_wp_error($attach_id)) {
+                    throw new Exception('Failed to insert attachment: ' . $attach_id->get_error_message());
+                }
+
+                // Generate attachment metadata
+                require_once(ABSPATH . 'wp-admin/includes/image.php');
+                $attach_data = wp_generate_attachment_metadata($attach_id, $file_path);
+                wp_update_attachment_metadata($attach_id, $attach_data);
+
+                // Log the migration
+                $this->rollback->log_operation('insert', 'attachment', $attach_id, $image['id']);
+                $this->migration_state['processed_items']++;
+            }
+
             $this->update_state();
-
-            // Re-queue the failed task
-            $this->push_to_queue([
-                'task' => $current_task,
-                'offset' => 0,
-                'batch_size' => 50
-            ]);
-            $this->save()->dispatch();
-
             return true;
+        } catch (Exception $e) {
+            throw new Exception('Image migration failed: ' . $e->getMessage());
         }
-
-        return false;
     }
 }

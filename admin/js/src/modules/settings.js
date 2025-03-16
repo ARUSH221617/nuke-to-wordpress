@@ -68,7 +68,7 @@ function initializeForm() {
     }
 
     try {
-      const response = await fetch(ajaxurl, {
+      const response = await fetch(nukeToWordPress.ajaxUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -146,18 +146,69 @@ function initializeTestConnection() {
   const testBtn = document.getElementById("test-connection");
   if (!testBtn) return;
 
-  testBtn.addEventListener("click", function () {
+  testBtn.addEventListener("click", async function (e) {
+    e.preventDefault();
+
+    // Show loading state
+    Swal.fire({
+      title: "Testing connection...",
+      allowOutsideClick: false,
+      didOpen: () => {
+        Swal.showLoading();
+      },
+    });
+
     const formData = new FormData(
       document.getElementById("nuke-to-wordpress-settings-form")
     );
-    const connectionStatus = document.getElementById("connection-status");
-    if (!connectionStatus) return;
 
-    const spinner = connectionStatus.querySelector(".connection-spinner");
-    const statusText = connectionStatus.querySelector(".connection-text");
-    if (!spinner || !statusText) return;
+    // Add the action and nonce to formData
+    formData.append("action", "test_connection");
+    formData.append(
+      "nonce",
+      document.getElementById("nuke_to_wordpress_settings_nonce").value
+    );
 
-    // Test connection logic here...
+    try {
+      const response = await fetch(nukeToWordPress.ajaxUrl, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        Swal.fire({
+          icon: "success",
+          title: "Success",
+          text: data.data.message,
+          confirmButtonColor: "hsl(var(--primary))",
+          customClass: {
+            confirmButton: "px-4 py-2 rounded-md",
+          },
+        });
+      } else {
+        Swal.fire({
+          icon: "error",
+          title: "Error",
+          text: data.data.message,
+          confirmButtonColor: "hsl(var(--primary))",
+          customClass: {
+            confirmButton: "px-4 py-2 rounded-md",
+          },
+        });
+      }
+    } catch (error) {
+      Swal.fire({
+        icon: "error",
+        title: "Error",
+        text: "Connection test failed: " + error.message,
+        confirmButtonColor: "hsl(var(--primary))",
+        customClass: {
+          confirmButton: "px-4 py-2 rounded-md",
+        },
+      });
+    }
   });
 }
 
@@ -165,8 +216,71 @@ function initializeCronToggle() {
   const cronToggle = document.getElementById("disable_wp_cron");
   if (!cronToggle) return;
 
-  cronToggle.addEventListener("change", function () {
-    // Cron toggle logic here...
+  cronToggle.addEventListener("change", async function () {
+    try {
+      // Show loading state
+      Swal.fire({
+        title: "Processing...",
+        text: "Updating WP Cron settings",
+        allowOutsideClick: false,
+        didOpen: () => {
+          Swal.showLoading();
+        },
+      });
+
+      const response = await fetch(nukeToWordPress.ajaxUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          action: "toggle_wp_cron",
+          nonce: nukeToWordPress.nonce,
+          disable_cron: this.checked,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        Swal.fire({
+          icon: "success",
+          title: "Success!",
+          text: data.data.message,
+          confirmButtonColor: "hsl(var(--primary))",
+          customClass: {
+            confirmButton: "px-4 py-2 rounded-md",
+          },
+        });
+      } else {
+        // If failed, revert the toggle
+        this.checked = !this.checked;
+
+        Swal.fire({
+          icon: "error",
+          title: "Error",
+          text: data.data?.message || "Failed to update WP Cron settings",
+          confirmButtonColor: "hsl(var(--primary))",
+          customClass: {
+            confirmButton: "px-4 py-2 rounded-md",
+          },
+        });
+      }
+    } catch (error) {
+      // If error occurs, revert the toggle
+      this.checked = !this.checked;
+
+      console.error("Cron toggle error:", error);
+      Swal.fire({
+        icon: "error",
+        title: "Error",
+        text: "Failed to update WP Cron settings. Please try again.",
+        confirmButtonColor: "hsl(var(--primary))",
+        customClass: {
+          confirmButton: "px-4 py-2 rounded-md",
+        },
+      });
+    }
   });
 }
 

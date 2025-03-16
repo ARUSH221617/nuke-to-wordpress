@@ -20,23 +20,21 @@ if (!defined('ABSPATH')) {
 }
 
 require_once plugin_dir_path(__FILE__) . 'includes/vendor/autoload.php';
+require_once plugin_dir_path(__FILE__) . 'admin/settings.php';
+require_once plugin_dir_path(__FILE__) . 'admin/migration.php';
 
 use NukeToWordPress\Migration_Background_Process;
+use NukeToWordPress\Migration_Rollback;
 
-// Activation hook
+// Core hooks
 register_activation_hook(__FILE__, 'nuke_to_wordpress_activate');
-
-// Deactivation hook
 register_deactivation_hook(__FILE__, 'nuke_to_wordpress_deactivate');
-
-// Initialization code
 add_action('admin_menu', 'nuke_to_wordpress_admin_menu');
 add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
 add_action('admin_enqueue_scripts', 'nuke_to_wordpress_admin_styles');
 
 function nuke_to_wordpress_activate()
 {
-    // Add the settings to the whitelist using the correct method
     add_option('nuke_to_wordpress_settings', [
         'nuke_db_host' => 'localhost',
         'nuke_db_name' => '',
@@ -107,10 +105,14 @@ function nuke_to_wordpress_enqueue_scripts($hook)
         true
     );
 
+    // Localize the script with new data
     wp_localize_script(
         'nuke-to-wordpress-admin',
-        'ajaxurl',
-        admin_url('admin-ajax.php')
+        'nukeToWordPress',
+        array(
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('nuke_to_wordpress_settings_nonce')
+        )
     );
 }
 add_action('admin_enqueue_scripts', 'nuke_to_wordpress_enqueue_scripts');
@@ -134,29 +136,21 @@ add_action('admin_enqueue_scripts', 'nuke_to_wordpress_admin_styles');
 
 function nuke_to_wordpress_settings_page()
 {
-    // Use plugin_dir_path to get the correct absolute path
-    require_once plugin_dir_path(__FILE__) . 'admin/settings.php';
     nuke_to_wordpress_settings_page_content();
 }
 
 function nuke_to_wordpress_migration_page()
 {
-    require_once plugin_dir_path(__FILE__) . 'admin/migration.php';
     nuke_to_wordpress_migration_page_content();
 }
 
-// Database connection functions
+// Database connections
 function nuke_to_wordpress_get_nuke_db_connection()
 {
     $options = get_option('nuke_to_wordpress_settings');
-    $host = $options['nuke_db_host'];
-    $dbname = $options['nuke_db_name'];
-    $user = $options['nuke_db_user'];
-    $password = $options['nuke_db_password'];
-
-    $dsn = "mysql:host=$host;dbname=$dbname;charset=utf8mb4";
+    $dsn = "mysql:host={$options['nuke_db_host']};dbname={$options['nuke_db_name']};charset=utf8mb4";
     try {
-        $pdo = new PDO($dsn, $user, $password);
+        $pdo = new PDO($dsn, $options['nuke_db_user'], $options['nuke_db_password']);
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         return $pdo;
     } catch (PDOException $e) {
@@ -171,37 +165,113 @@ function nuke_to_wordpress_get_wp_db_connection()
     return $wpdb;
 }
 
-// Initialize the background processor
+// Core migration functions
 global $migration_process;
 $migration_process = new Migration_Background_Process();
 
-// Start migration function
 function nuke_to_wordpress_start_migration()
 {
-    check_ajax_referer('start_migration', 'nonce');
+    try {
+        // Validate nonce
+        if (!isset($_POST['nonce'])) {
+            throw new Exception('Security validation failed: nonce is missing', 400);
+        }
 
-    global $migration_process;
+        // Security check
+        if (!check_ajax_referer('start_migration', 'nonce', false)) {
+            throw new Exception('Security validation failed: invalid nonce', 403);
+        }
 
-    // Initialize migration state
-    update_option('nuke_to_wordpress_migration_state', [
-        'status' => 'starting',
-        'current_batch' => 0,
-        'total_items' => 0,
-        'processed_items' => 0,
-        'current_task' => 'init',
-        'last_error' => '',
-        'last_run' => current_time('mysql')
-    ]);
+        // Permission check
+        if (!current_user_can('manage_options')) {
+            throw new Exception('Insufficient permissions to start migration', 403);
+        }
 
-    // Queue the initial task
-    $migration_process->push_to_queue(['task' => 'init']);
-    $migration_process->save()->dispatch();
+        // Delete any existing migration state first to ensure clean start
+        delete_option('nuke_to_wordpress_migration_state');
 
-    wp_send_json_success(['message' => 'Migration started']);
+        // Initialize migration state
+        $migration_state = array(
+            'status' => 'starting',
+            'current_batch' => 0,
+            'total_items' => 0,
+            'processed_items' => 0,
+            'current_task' => 'init',
+            'last_error' => '',
+            'last_run' => current_time('mysql'),
+            'start_time' => current_time('mysql'),
+            'checkpoints' => array()
+        );
+
+        // Use add_option instead of update_option to ensure clean initialization
+        $state_added = add_option('nuke_to_wordpress_migration_state', $migration_state);
+
+        if ($state_added != 1) {
+            // If add_option failed, try update_option as fallback
+            $state_updated = update_option('nuke_to_wordpress_migration_state', $migration_state);
+            if ($state_updated === false) {
+                throw new Exception('Failed to initialize migration state', 500);
+            }
+        }
+
+        // Check if database connections work
+        $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+        if (!$nuke_db) {
+            throw new Exception('Could not connect to Nuke database', 500);
+        }
+
+        // Verify required tables exist
+        try {
+            $nuke_db->query("SHOW TABLES")->fetchAll();
+        } catch (PDOException $e) {
+            throw new Exception('Failed to verify Nuke database structure: ' . $e->getMessage(), 500);
+        }
+
+        global $migration_process;
+        if (!$migration_process) {
+            throw new Exception('Migration process not initialized', 500);
+        }
+
+        // Queue initial task
+        $migration_process->push_to_queue(array('task' => 'init'));
+        $dispatch_result = $migration_process->save()->dispatch();
+
+        if (!$dispatch_result) {
+            throw new Exception('Failed to dispatch migration process', 500);
+        }
+
+        // Log successful start if debug is enabled
+        if (get_option('nuke_to_wordpress_debug_enabled')) {
+            error_log('[Nuke to WordPress] Migration started successfully');
+        }
+
+        wp_send_json_success(array(
+            'message' => 'Migration started successfully',
+            'state' => $migration_state
+        ));
+
+    } catch (Exception $e) {
+        // Log the error if debug is enabled
+        if (get_option('nuke_to_wordpress_debug_enabled')) {
+            error_log('[Nuke to WordPress] Migration error: ' . $e->getMessage());
+        }
+
+        // Update migration state with error
+        update_option('nuke_to_wordpress_migration_state', array(
+            'status' => 'error',
+            'last_error' => $e->getMessage(),
+            'last_run' => current_time('mysql')
+        ));
+
+        wp_send_json_error(array(
+            'message' => $e->getMessage(),
+            'code' => $e->getCode() ?: 500
+        ), $e->getCode() ?: 500);
+    }
 }
+
 add_action('wp_ajax_start_migration', 'nuke_to_wordpress_start_migration');
 
-// Check migration status
 function nuke_to_wordpress_check_status()
 {
     check_ajax_referer('start_migration', 'nonce');
@@ -214,10 +284,9 @@ function nuke_to_wordpress_check_status()
         'last_run' => ''
     ]);
 
-    $progress = 0;
-    if ($migration_state['total_items'] > 0) {
-        $progress = ($migration_state['processed_items'] / $migration_state['total_items']) * 100;
-    }
+    $progress = ($migration_state['total_items'] > 0)
+        ? ($migration_state['processed_items'] / $migration_state['total_items']) * 100
+        : 0;
 
     wp_send_json_success([
         'status' => $migration_state['status'],
@@ -229,110 +298,20 @@ function nuke_to_wordpress_check_status()
 }
 add_action('wp_ajax_check_migration_status', 'nuke_to_wordpress_check_status');
 
-function nuke_to_wordpress_migrate_categories_batch($batch_size)
-{
-    $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
-    $offset = get_option('nuke_to_wordpress_category_offset', 0);
-
-    $stmt = $nuke_db->prepare("SELECT * FROM nuke_categories LIMIT :offset, :batch_size");
-    $stmt->bindParam(':offset', $offset, PDO::PARAM_INT);
-    $stmt->bindParam(':batch_size', $batch_size, PDO::PARAM_INT);
-    $stmt->execute();
-
-    $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    $processed = 0;
-
-    foreach ($categories as $category) {
-        wp_insert_term(
-            $category['title'],
-            'category',
-            [
-                'description' => $category['description'],
-                'slug' => sanitize_title($category['title'])
-            ]
-        );
-        $processed++;
-    }
-
-    update_option('nuke_to_wordpress_category_offset', $offset + $processed);
-    return $processed;
-}
-
-// Similar batch processing functions for articles and images
-function nuke_to_wordpress_migrate_articles_batch($batch_size)
-{
-    // Implementation similar to categories batch processing
-    // but for articles
-}
-
-function nuke_to_wordpress_migrate_images_batch($batch_size)
-{
-    // Implementation similar to categories batch processing
-    // but for images
-}
-
-function nuke_to_wordpress_retry_migration()
-{
-    check_ajax_referer('start_migration', 'nonce');
-
-    global $migration_process;
-    $result = $migration_process->retry_failed_migration();
-
-    if ($result) {
-        wp_send_json_success(['message' => 'Migration retry initiated']);
-    } else {
-        wp_send_json_error(['message' => 'Unable to retry migration']);
-    }
-}
-add_action('wp_ajax_retry_migration', 'nuke_to_wordpress_retry_migration');
-
-function nuke_to_wordpress_rollback_migration()
-{
-    check_ajax_referer('start_migration', 'nonce');
-
-    $rollback = new Migration_Rollback();
-    $result = $rollback->rollback();
-
-    if ($result) {
-        // Reset migration state
-        update_option('nuke_to_wordpress_migration_state', [
-            'status' => 'not_started',
-            'current_batch' => 0,
-            'total_items' => 0,
-            'processed_items' => 0,
-            'current_task' => '',
-            'last_error' => '',
-            'last_run' => current_time('mysql'),
-            'checkpoints' => []
-        ]);
-
-        wp_send_json_success(['message' => 'Migration rolled back successfully']);
-    } else {
-        wp_send_json_error(['message' => 'Failed to rollback migration']);
-    }
-}
-add_action('wp_ajax_rollback_migration', 'nuke_to_wordpress_rollback_migration');
-
 function nuke_to_wordpress_cancel_migration()
 {
     check_ajax_referer('start_migration', 'nonce');
-
     global $migration_process;
 
-    // Update migration state
     $migration_state = get_option('nuke_to_wordpress_migration_state', []);
     $migration_state['status'] = 'cancelled';
     update_option('nuke_to_wordpress_migration_state', $migration_state);
 
-    // Cancel the background process
     $migration_process->cancel_process();
-
-    // Perform rollback
     $rollback = new Migration_Rollback();
     $result = $rollback->rollback();
 
     if ($result) {
-        // Reset migration state
         update_option('nuke_to_wordpress_migration_state', [
             'status' => 'not_started',
             'current_batch' => 0,
@@ -343,7 +322,6 @@ function nuke_to_wordpress_cancel_migration()
             'last_run' => current_time('mysql'),
             'checkpoints' => []
         ]);
-
         wp_send_json_success(['message' => 'Migration cancelled and rolled back successfully']);
     } else {
         wp_send_json_error(['message' => 'Failed to cancel migration']);
@@ -489,7 +467,7 @@ function nuke_to_wordpress_restore_default_cron()
 
 function nuke_to_wordpress_manual_migration_step()
 {
-    check_ajax_referer('start_migration', 'nonce');
+    check_ajax_referer('migration_nonce', 'nonce');
 
     if (!current_user_can('manage_options')) {
         wp_send_json_error(['message' => 'Insufficient permissions']);
@@ -497,41 +475,19 @@ function nuke_to_wordpress_manual_migration_step()
     }
 
     $step = isset($_POST['step']) ? sanitize_text_field($_POST['step']) : '';
-    $valid_steps = ['categories', 'articles', 'images'];
-
-    if (!in_array($step, $valid_steps)) {
-        wp_send_json_error(['message' => 'Invalid migration step']);
+    if (empty($step)) {
+        wp_send_json_error(['message' => 'No step specified']);
         return;
     }
 
     try {
-        // Get migration state
-        $migration_state = get_option('nuke_to_wordpress_migration_state', []);
+        global $migration_process;
 
-        // Create checkpoint before starting step
-        $rollback = new Migration_Rollback();
-        $checkpoint = $rollback->create_checkpoint();
+        // Push the specific step to the queue
+        $migration_process->push_to_queue(['task' => $step]);
+        $migration_process->save()->dispatch();
 
-        $result = execute_manual_step($step);
-
-        if ($result['success']) {
-            // Update migration state
-            $migration_state['processed_items'] += $result['processed'];
-            $migration_state['current_task'] = $step;
-            update_option('nuke_to_wordpress_migration_state', $migration_state);
-
-            wp_send_json_success([
-                'message' => $result['message'],
-                'progress' => [
-                    'processed_items' => $migration_state['processed_items'],
-                    'total_items' => $migration_state['total_items']
-                ]
-            ]);
-        } else {
-            // Rollback changes if step failed
-            $rollback->rollback($checkpoint);
-            wp_send_json_error(['message' => $result['message']]);
-        }
+        wp_send_json_success(['message' => "Manual migration step '$step' queued successfully"]);
     } catch (Exception $e) {
         wp_send_json_error(['message' => $e->getMessage()]);
     }
@@ -686,4 +642,44 @@ function nuke_to_wordpress_clear_logs()
     }
 }
 add_action('wp_ajax_clear_debug_logs', 'nuke_to_wordpress_clear_logs');
-?>
+
+function nuke_to_wordpress_check_migration_status()
+{
+    check_ajax_referer('migration_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    $migration_state = get_option('nuke_to_wordpress_migration_state', [
+        'status' => 'not_started',
+        'processed_items' => 0,
+        'total_items' => 0,
+        'current_task' => '',
+        'last_run' => ''
+    ]);
+
+    wp_send_json_success($migration_state);
+}
+add_action('wp_ajax_check_migration_status', 'nuke_to_wordpress_check_migration_status');
+
+function nuke_to_wordpress_test_connection()
+{
+    check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+
+    try {
+        $nuke_db = nuke_to_wordpress_get_nuke_db_connection();
+        // Test the connection by running a simple query
+        $nuke_db->query("SELECT 1");
+        wp_send_json_success(['message' => 'Connection successful']);
+    } catch (Exception $e) {
+        wp_send_json_error(['message' => 'Connection failed: ' . $e->getMessage()]);
+    }
+}
+add_action('wp_ajax_test_connection', 'nuke_to_wordpress_test_connection');

@@ -255,40 +255,63 @@ function nuke_to_wordpress_sanitize_settings($input)
 }
 
 function nuke_to_wordpress_save_settings() {
+    // Fallback logging function in case debug handler fails
+    $fallback_log = function($message, $type = 'error') {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log("Nuke to WordPress ($type): $message");
+        }
+    };
+
     try {
-        // Debug logging
-        $debug = Nuke_To_WordPress_Debug_Handler::get_instance();
-        $debug->log('Attempting to save settings');
+        // Try to initialize debug handler
+        try {
+            $debug = Nuke_To_WordPress_Debug_Handler::get_instance();
+        } catch (Throwable $e) {
+            $fallback_log("Debug handler initialization failed: " . $e->getMessage());
+            $debug = null;
+        }
+
+        // Safe logging function
+        $log = function($message, $context = [], $level = 'info') use ($debug, $fallback_log) {
+            if ($debug) {
+                $debug->log($message, $context, $level);
+            } else {
+                $fallback_log($message, $level);
+            }
+        };
+
+        $log('Attempting to save settings', [], 'info');
 
         // Verify nonce
         if (!check_ajax_referer('nuke_to_wordpress_settings_nonce', 'nonce', false)) {
-            $debug->log('Nonce verification failed', [], 'error');
+            $log('Nonce verification failed', [], 'error');
             wp_send_json_error(['message' => 'Invalid security token']);
             return;
         }
 
         // Check permissions
         if (!current_user_can('manage_options')) {
-            $debug->log('Permission check failed', [], 'error');
+            $log('Permission check failed', [], 'error');
             wp_send_json_error(['message' => 'Insufficient permissions']);
             return;
         }
 
-        // Get settings from POST data
-        $settings = isset($_POST['settings']) ? $_POST['settings'] : null;
-        
-        if (!is_array($settings)) {
-            $debug->log('Invalid settings data received', [], 'error');
+        // Get settings from POST data and validate
+        $raw_settings = $_POST['settings'] ?? '';
+        if (empty($raw_settings)) {
+            $log('Invalid settings data received', [], 'error');
             wp_send_json_error(['message' => 'Invalid settings data']);
             return;
         }
 
+        $settings = json_decode(stripslashes($raw_settings), true);
+
         // Sanitize settings
         $sanitized_settings = [
-            'nuke_db_host' => sanitize_text_field($settings['nuke_db_host'] ?? ''),
-            'nuke_db_name' => sanitize_text_field($settings['nuke_db_name'] ?? ''),
-            'nuke_db_user' => sanitize_text_field($settings['nuke_db_user'] ?? ''),
-            'nuke_db_password' => $settings['nuke_db_password'] ?? '',
+            'nuke_db_host' => sanitize_text_field($settings['nuke_to_wordpress_settings[nuke_db_host]'] ?? ''),
+            'nuke_db_name' => sanitize_text_field($settings['nuke_to_wordpress_settings[nuke_db_name]'] ?? ''),
+            'nuke_db_user' => sanitize_text_field($settings['nuke_to_wordpress_settings[nuke_db_user]'] ?? ''),
+            'nuke_db_password' => $settings['nuke_to_wordpress_settings[nuke_db_password]'] ?? '',
         ];
 
         // Validate required fields
@@ -323,32 +346,27 @@ function nuke_to_wordpress_save_settings() {
             $pdo->query('SELECT 1');
 
             // Save settings
-            $updated = update_option('nuke_to_wordpress_settings', $sanitized_settings);
+            update_option('nuke_to_wordpress_settings', $sanitized_settings);
 
             // Save additional settings
             update_option('nuke_to_wordpress_cron_disabled', 
                 isset($settings['disable_wp_cron']) && $settings['disable_wp_cron'] === 'on'
             );
-            
+
             update_option('nuke_to_wordpress_debug_enabled', 
                 isset($settings['enable_debug']) && $settings['enable_debug'] === 'on'
             );
 
-            if ($updated) {
-                $debug->log('Settings saved successfully');
-                wp_send_json_success(['message' => 'Settings saved successfully']);
-            } else {
-                $debug->log('Failed to update settings in database', [], 'error');
-                wp_send_json_error(['message' => 'Failed to update settings']);
-            }
+            $log('Settings saved successfully', [], 'info');
+            wp_send_json_success(['message' => 'Settings saved successfully']);
 
         } catch (PDOException $e) {
-            $debug->log('Database connection failed', ['error' => $e->getMessage()], 'error');
+            $log('Database connection failed: ' . $e->getMessage(), [], 'error');
             wp_send_json_error(['message' => 'Database connection failed: ' . $e->getMessage()]);
         }
 
-    } catch (Exception $e) {
-        $debug->log('Unexpected error', ['error' => $e->getMessage()], 'error');
+    } catch (Throwable $e) {
+        $log('Unexpected error: ' . $e->getMessage(), [], 'error');
         wp_send_json_error(['message' => 'An unexpected error occurred']);
     }
 }

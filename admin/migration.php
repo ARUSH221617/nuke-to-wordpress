@@ -12,6 +12,14 @@ function nuke_to_wordpress_migration_page_content() {
         'last_run' => '',
         'last_error' => ''
     ]);
+    // $migration_state=[
+    //     'status' => 'starting',
+    //     'current_task' => '',
+    //     'processed_items' => 0,
+    //     'total_items' => 0,
+    //     'last_run' => '',
+    //     'last_error' => ''
+    // ];
 
     $progress = 0;
     if ($migration_state['total_items'] > 0) {
@@ -25,7 +33,7 @@ function nuke_to_wordpress_migration_page_content() {
                     Nuke to WordPress Migration
                 </h1>
 
-                <?php if ($migration_state['status'] === 'not_started'): ?>
+                <?php if ($migration_state['status'] === 'not_started'||$migration_state['status'] === 'cancelled'): ?>
                     <!-- Migration Start Form -->
                     <div class="bg-card rounded-xl p-6 border mb-6">
                         <h2 class="text-2xl font-semibold mb-4">Start Migration</h2>
@@ -74,6 +82,7 @@ function nuke_to_wordpress_migration_page_content() {
                     </div>
 
                 <?php else: ?>
+                    <?php wp_nonce_field('start_migration', 'migration_nonce'); ?>
                     <!-- Migration Progress -->
                     <div class="bg-card rounded-xl p-6 border">
                         <h2 class="text-2xl font-semibold mb-4">Migration Progress</h2>
@@ -156,7 +165,7 @@ function nuke_to_wordpress_migration_page_content() {
                     </div>
 
                     <!-- Manual Steps Section -->
-                    <div id="manual-controls" class="mt-6 <?php echo $migration_state['mode'] === 'manual' ? '' : 'hidden'; ?>">
+                    <div id="manual-controls" class="mt-6 <?php echo @$migration_state['mode'] === 'manual' ? '' : 'hidden'; ?>">
                         <div class="bg-card rounded-xl p-6 border">
                             <h3 class="text-xl font-semibold mb-4">Manual Migration Steps</h3>
                             <div class="space-y-4">
@@ -202,191 +211,5 @@ function nuke_to_wordpress_migration_page_content() {
             </div>
         </div>
     </div>
-
-    <script>
-        jQuery(document).ready(function($) {
-            const CHECK_INTERVAL = 5000; // Check every 5 seconds
-            let checkTimer;
-
-            // Migration mode toggle
-            $('input[name="migration_mode"]').on('change', function() {
-                const isManual = $(this).val() === 'manual';
-                $('#manual-controls').toggleClass('hidden', !isManual);
-                $('#migration-form').toggleClass('hidden', isManual);
-            });
-
-            // Start migration form submission
-            $('#migration-form').on('submit', function(e) {
-                e.preventDefault();
-                startMigration();
-            });
-
-            function startMigration() {
-                $.ajax({
-                    url: ajaxurl,
-                    type: 'POST',
-                    data: {
-                        action: 'start_migration',
-                        nonce: $('#migration_nonce').val()
-                    },
-                    success: function(response) {
-                        if (response.success) {
-                            location.reload();
-                        } else {
-                            showError(response.data.message || 'Failed to start migration');
-                        }
-                    },
-                    error: function() {
-                        showError('Failed to start migration');
-                    }
-                });
-            }
-
-            // Manual step execution
-            $('.manual-step-btn').on('click', function() {
-                const $btn = $(this);
-                const step = $btn.data('step');
-                
-                if ($btn.prop('disabled')) {
-                    return;
-                }
-
-                executeManualStep($btn, step);
-            });
-
-            function executeManualStep($btn, step) {
-                $btn.prop('disabled', true)
-                    .find('.step-status')
-                    .html('<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>');
-
-                $.ajax({
-                    url: ajaxurl,
-                    type: 'POST',
-                    data: {
-                        action: 'manual_migration_step',
-                        step: step,
-                        nonce: $('#migration_nonce').val()
-                    },
-                    success: function(response) {
-                        if (response.success) {
-                            $btn.find('.step-status').html('<span class="text-success">✓ Complete</span>');
-                            $btn.next('.manual-step-btn').prop('disabled', false);
-                            updateProgress(response.data.progress);
-                        } else {
-                            $btn.find('.step-status').html('<span class="text-destructive">✗ Failed</span>');
-                            $btn.prop('disabled', false);
-                            showError(response.data.message || 'Step failed');
-                        }
-                    },
-                    error: function() {
-                        $btn.find('.step-status').html('<span class="text-destructive">✗ Error</span>');
-                        $btn.prop('disabled', false);
-                        showError('Network error occurred');
-                    }
-                });
-            }
-
-            // Progress checking for automatic mode
-            if ($('#migration-progress').is(':visible')) {
-                startStatusCheck();
-            }
-
-            function startStatusCheck() {
-                checkMigrationStatus();
-                checkTimer = setInterval(checkMigrationStatus, CHECK_INTERVAL);
-            }
-
-            function checkMigrationStatus() {
-                $.ajax({
-                    url: ajaxurl,
-                    type: 'POST',
-                    data: {
-                        action: 'check_migration_status',
-                        nonce: $('#migration_nonce').val()
-                    },
-                    success: function(response) {
-                        if (response.success && response.data) {
-                            updateProgress(response.data);
-
-                            if (response.data.status === 'completed') {
-                                clearInterval(checkTimer);
-                                location.reload();
-                            } else if (response.data.status === 'failed') {
-                                clearInterval(checkTimer);
-                                location.reload();
-                            }
-                        }
-                    }
-                });
-            }
-
-            function updateProgress(data) {
-                if (!data) return;
-                
-                const progress = Math.round(data.progress || 0);
-                $('.progress-bar').css('width', progress + '%');
-                $('.progress-percentage').text(progress + '% Complete');
-                $('.current-task').text(data.current_task || 'Initializing...');
-                $('.last-run span').text(data.last_run || 'Just now');
-            }
-
-            function showError(message) {
-                const errorHtml = `
-                    <div class="bg-destructive/15 text-destructive rounded-lg p-4 mb-6">
-                        <p class="text-sm font-medium">${message}</p>
-                    </div>
-                `;
-                
-                $('.error-message').html(errorHtml).removeClass('hidden');
-            }
-
-            // Action buttons
-            $('#retry-migration').on('click', function() {
-                $.ajax({
-                    url: ajaxurl,
-                    type: 'POST',
-                    data: {
-                        action: 'retry_migration',
-                        nonce: $('#migration_nonce').val()
-                    },
-                    success: function(response) {
-                        if (response.success) {
-                            location.reload();
-                        } else {
-                            showError('Failed to retry migration');
-                        }
-                    },
-                    error: function() {
-                        showError('Failed to retry migration');
-                    }
-                });
-            });
-
-            $('#cancel-migration').on('click', function() {
-                if (!confirm('Are you sure you want to cancel the migration? This will stop the process and rollback changes.')) {
-                    return;
-                }
-
-                $.ajax({
-                    url: ajaxurl,
-                    type: 'POST',
-                    data: {
-                        action: 'cancel_migration',
-                        nonce: $('#migration_nonce').val()
-                    },
-                    success: function(response) {
-                        if (response.success) {
-                            location.reload();
-                        } else {
-                            showError('Failed to cancel migration');
-                        }
-                    },
-                    error: function() {
-                        showError('Failed to cancel migration');
-                    }
-                });
-            });
-        });
-    </script>
     <?php
-}?>
+}
